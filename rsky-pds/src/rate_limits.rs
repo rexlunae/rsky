@@ -520,8 +520,22 @@ pub fn client_ip(req: &Request<'_>) -> Option<IpAddr> {
         .or_else(|| req.client_ip())
 }
 
-/// What a handler needs to charge its route limits: the caller's address,
-/// rendered, and whether the request bypasses limits.
+/// The block a limit counts an address under: an IPv4 address (or an IPv4-mapped
+/// IPv6 one) as itself, an IPv6 address by its /64. One host usually holds a whole
+/// /64, and could otherwise take a fresh budget from each of its 2^64 addresses.
+pub fn limit_key(ip: IpAddr) -> String {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => {
+            let prefix = std::net::Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64));
+            format!("{prefix}/64")
+        }
+    }
+}
+
+/// What a handler needs to charge its route limits: the block the caller's
+/// address is counted under ([`limit_key`]), and whether the request bypasses
+/// limits.
 pub struct Caller {
     pub ip: String,
     pub bypass: bool,
@@ -538,7 +552,7 @@ impl<'r> FromRequest<'r> for Caller {
             .state::<RateLimits>()
             .is_some_and(|limits| limits.bypasses(req.headers().get_one("x-ratelimit-bypass"), ip));
         Outcome::Success(Caller {
-            ip: ip.map(|ip| ip.to_string()).unwrap_or_default(),
+            ip: ip.map(limit_key).unwrap_or_default(),
             bypass,
         })
     }
@@ -552,6 +566,16 @@ pub fn global_limit_applies(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_callers_are_counted_by_their_64() {
+        let key = |s: &str| limit_key(s.parse().unwrap());
+        assert_eq!(key("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "2001:db8:1:2::/64");
+        assert_eq!(key("2001:db8:1:2::1"), key("2001:db8:1:2:ffff::9"));
+        assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+        assert_eq!(key("198.51.100.7"), "198.51.100.7");
+        assert_eq!(key("::ffff:198.51.100.7"), "198.51.100.7");
+    }
 
     /// Tests that change limit settings in the environment take this lock.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

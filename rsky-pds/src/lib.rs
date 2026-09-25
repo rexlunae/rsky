@@ -218,7 +218,7 @@ impl Fairing for GlobalRateLimit {
         if limits.bypasses(request.headers().get_one("x-ratelimit-bypass"), ip) {
             return;
         }
-        let key = ip.map(|ip| ip.to_string()).unwrap_or_default();
+        let key = ip.map(rate_limits::limit_key).unwrap_or_default();
         if let Err(status) = limits.consume(&rate_limits::GLOBAL_IP, &key, 1).await {
             request.local_cache(|| Some(ApiError::RateLimitExceeded(status)));
             request.set_method(rocket::http::Method::Get);
