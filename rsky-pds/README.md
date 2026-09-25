@@ -61,6 +61,7 @@ Mount a volume at `PDS_DATA_DIRECTORY` to persist data.
 | `PDS_MAX_CONCURRENT_EXPORTS` | Repository exports served at once (default 4); further requests wait up to 30 s, then 503 |
 | `PDS_MAX_CONCURRENT_BLOB_READS` | Blob downloads served at once (default 32) |
 | `PDS_RATE_LIMITS_ENABLED` | Apply the reference PDS's request limits (default false) |
+| `PDS_ACCESS_TOKEN_LIFETIME_SECS` | Lifetime of a password or app-password session's access token, 300 to 7200 seconds (default 7200). Access tokens are stateless, so this bounds how long one keeps working after its session is revoked |
 | `PDS_RATE_LIMIT_BYPASS_KEY` | Value of an `x-ratelimit-bypass` header that skips every limit |
 | `PDS_RATE_LIMIT_BYPASS_IPS` | Comma-separated addresses that skip every limit |
 | `PDS_BLOB_UPLOAD_LIMIT` | Max blob upload size in bytes (default 5MB) |

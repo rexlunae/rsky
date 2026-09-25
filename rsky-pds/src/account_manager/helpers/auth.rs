@@ -20,6 +20,23 @@ use thiserror::Error;
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
 pub const REFRESH_TOKEN_TYP: &str = "refresh+jwt";
 const ACCESS_TOKEN_LIFETIME_SECS: u64 = 2 * 60 * 60;
+/// The shortest access-token lifetime `PDS_ACCESS_TOKEN_LIFETIME_SECS` may set.
+const MIN_ACCESS_TOKEN_LIFETIME_SECS: u64 = 5 * 60;
+
+/// How long a password or app-password session's access token lives:
+/// `PDS_ACCESS_TOKEN_LIFETIME_SECS`, between five minutes and the reference PDS's two
+/// hours (the default). Access tokens are stateless, so this bounds how long one keeps
+/// working after its session is revoked (a password change, a takedown).
+static ACCESS_TOKEN_LIFETIME: LazyLock<u64> = LazyLock::new(|| {
+    access_token_lifetime(std::env::var("PDS_ACCESS_TOKEN_LIFETIME_SECS").ok().as_deref())
+});
+
+fn access_token_lifetime(setting: Option<&str>) -> u64 {
+    setting
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|secs| secs.clamp(MIN_ACCESS_TOKEN_LIFETIME_SECS, ACCESS_TOKEN_LIFETIME_SECS))
+        .unwrap_or(ACCESS_TOKEN_LIFETIME_SECS)
+}
 const REFRESH_TOKEN_LIFETIME_SECS: u64 = 90 * 24 * 60 * 60;
 
 pub struct CreateTokensOpts {
@@ -416,7 +433,7 @@ pub fn create_access_token_with(signer: &JwtSigner, opts: CreateTokensOpts) -> R
     } = opts;
     let scope = scope.unwrap_or(AuthScope::Access);
     let iat = issued_at.unwrap_or_else(now_secs);
-    let exp = iat + expires_in_secs.unwrap_or(ACCESS_TOKEN_LIFETIME_SECS);
+    let exp = iat + expires_in_secs.unwrap_or(*ACCESS_TOKEN_LIFETIME);
     signer.sign(
         ACCESS_TOKEN_TYP,
         &AccessClaims {
@@ -701,6 +718,17 @@ pub fn get_refresh_token_id() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_access_token_lifetime_is_configurable_within_bounds() {
+        assert_eq!(access_token_lifetime(None), 2 * 60 * 60);
+        assert_eq!(access_token_lifetime(Some("900")), 900);
+        assert_eq!(access_token_lifetime(Some(" 900 ")), 900);
+        assert_eq!(access_token_lifetime(Some("10")), 5 * 60);
+        assert_eq!(access_token_lifetime(Some("999999")), 2 * 60 * 60);
+        assert_eq!(access_token_lifetime(Some("soon")), 2 * 60 * 60);
+    }
+
     use super::*;
     use std::path::Path;
 
