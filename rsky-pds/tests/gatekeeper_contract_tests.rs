@@ -83,7 +83,7 @@ async fn gatekeeper_rows_never_disturb_this_servers_token_flows() {
     )
     .await;
     assert_eq!(status, Status::Ok, "{session}");
-    let bearer = format!("Bearer {}", session["accessJwt"].as_str().unwrap());
+    assert!(session["accessJwt"].as_str().is_some(), "{session}");
 
     // a password reset is requested and completed beside the row; the reset
     // removes its own token and nothing else, as the reference does
@@ -118,6 +118,19 @@ async fn gatekeeper_rows_never_disturb_this_servers_token_flows() {
         vec![(GATEKEEPER_PURPOSE.to_owned(), "12345".to_owned())],
         "the reset removed only its own token"
     );
+
+    // the reset cut off every session token issued before it (the token cut-off), so
+    // sign in again with the new password, past the second of the reset
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (status, session) = post(
+        &client,
+        "/xrpc/com.atproto.server.createSession",
+        json!({"identifier": email, "password": "a-new-password-1"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, Status::Ok, "{session}");
+    let bearer = format!("Bearer {}", session["accessJwt"].as_str().unwrap());
 
     // an email confirmation completes beside the row and leaves it alone
     let (status, body) = post(

@@ -227,15 +227,16 @@ impl AccountManager {
         account::delete_account(did, &self.db).await
     }
 
-    /// Applies or reverses a takedown and revokes every refresh token and
-    /// OAuth session either way, so reversing a takedown still forces a
+    /// Applies or reverses a takedown and revokes every refresh token, OAuth session
+    /// and session JWT issued so far either way, so reversing a takedown still forces a
     /// fresh login. Returns how many OAuth sessions were revoked.
     pub async fn takedown_account(&self, did: &str, takedown: StatusAttr) -> Result<u64> {
         self.admit(did)?;
-        let (_, _, oauth_revoked) = try_join!(
+        let (_, _, oauth_revoked, _) = try_join!(
             account::update_account_takedown_status(did, takedown, &self.db),
             auth::revoke_refresh_tokens_by_did(did, &self.db),
-            auth::revoke_oauth_tokens_by_did(did, &self.db)
+            auth::revoke_oauth_tokens_by_did(did, &self.db),
+            auth::cut_off_tokens(did, &self.db)
         )?;
         Ok(oauth_revoked)
     }
@@ -480,10 +481,10 @@ impl AccountManager {
 
     /// Changes the password and closes every way in that the old one could have opened:
     /// refresh tokens (password and app-password sessions), OAuth sessions (their access
-    /// tokens are checked against the session row, so they stop at once), and every app
-    /// password, since a full session can mint one that would otherwise outlive the
-    /// change. Access JWTs of password and app-password sessions are stateless and live
-    /// out their lifetime (`PDS_ACCESS_TOKEN_LIFETIME_SECS`).
+    /// tokens are checked against the session row, so they stop at once), every app
+    /// password (a full session could otherwise mint one that outlives the change), and
+    /// every session JWT issued up to now, stateless access tokens included
+    /// ([`auth::cut_off_tokens`]).
     pub async fn update_account_password(&self, opts: UpdateAccountPasswordOpts) -> Result<()> {
         self.admit(&opts.did)?;
         let UpdateAccountPasswordOpts { did, .. } = opts;
@@ -499,9 +500,16 @@ impl AccountManager {
             email_token::delete_email_token(&did, EmailTokenPurpose::ResetPassword, &self.db),
             auth::revoke_refresh_tokens_by_did(&did, &self.db),
             auth::revoke_oauth_tokens_by_did(&did, &self.db),
-            password::delete_all_app_passwords(&did, &self.db)
+            password::delete_all_app_passwords(&did, &self.db),
+            auth::cut_off_tokens(&did, &self.db)
         )?;
         Ok(())
+    }
+
+    /// When `did`'s session tokens were last cut off: a JWT issued at or before it is
+    /// refused.
+    pub async fn tokens_cut_off_at(&self, did: &str) -> Result<Option<u64>> {
+        auth::tokens_cut_off_at(did, &self.db).await
     }
 
     pub async fn revoke_app_password(&self, did: String, name: String) -> Result<()> {

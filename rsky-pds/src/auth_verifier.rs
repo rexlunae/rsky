@@ -229,6 +229,13 @@ impl<'r> FromRequest<'r> for Refresh {
                 return Outcome::Error((status, error));
             }
         };
+        // A refresh token issued before the account's token cut-off is dead too, even
+        // if its row somehow survived.
+        if let Err(error) = check_token_cut_off(req, &did, payload.iat).await {
+            let (status, error) = bearer_failure(error);
+            req.local_cache(|| Some(ApiError::from(&error)));
+            return Outcome::Error((status, error));
+        }
         Outcome::Success(Refresh {
             access: AccessOutput {
                 credentials: Some(Credentials {
@@ -287,6 +294,12 @@ pub async fn access_check(
 fn bearer_failure(error: anyhow::Error) -> (Status, AuthError) {
     match error.downcast_ref::<AuthError>() {
         Some(AuthError::AuthMissing) => (Status::Unauthorized, AuthError::AuthMissing),
+        // A token cut off by a password change or takedown: the session is over.
+        Some(AuthError::ExpiredToken) => (Status::BadRequest, AuthError::ExpiredToken),
+        Some(AuthError::InternalServerError(e)) => (
+            Status::InternalServerError,
+            AuthError::InternalServerError(e.clone()),
+        ),
         _ if is_expired_jwt(&error) => (Status::BadRequest, AuthError::ExpiredToken),
         _ => (Status::BadRequest, AuthError::BadJwt(error.to_string())),
     }
@@ -995,8 +1008,9 @@ pub async fn validate_bearer_access_token(
         scope,
         token,
         audience,
-        ..
+        payload,
     } = validate_bearer_token(request, scopes, ACCESS_TOKEN_TYP, &options)?;
+    check_token_cut_off(request, &did, payload.iat).await?;
     let is_privileged = scope.is_privileged();
     Ok(AccessOutput {
         credentials: Some(Credentials {
@@ -1189,6 +1203,25 @@ async fn validate_dpop_access_token(
     })
 }
 
+/// Refuse a session JWT of `did` issued at or before its token cut-off (a password
+/// change or takedown since): stateless access tokens and refresh tokens alike stop at
+/// once instead of living out their lifetime.
+async fn check_token_cut_off(request: &Request<'_>, did: &str, iat: Option<u64>) -> Result<()> {
+    let account_manager = match request.guard::<AccountManager>().await {
+        Outcome::Success(account_manager) => account_manager,
+        _ => {
+            return Err(anyhow::Error::new(AuthError::InternalServerError(
+                "Unexpected Error Occurred".to_string(),
+            )))
+        }
+    };
+    let cut_off_at = account_manager.tokens_cut_off_at(did).await?;
+    if crate::account_manager::helpers::auth::cut_off(iat, cut_off_at) {
+        return Err(anyhow::Error::new(AuthError::ExpiredToken));
+    }
+    Ok(())
+}
+
 async fn check_account_status(
     request: &Request<'_>,
     did: &str,
@@ -1254,8 +1287,9 @@ pub async fn validate_access_token(
         scope,
         token,
         audience,
-        ..
+        payload,
     } = validate_bearer_token(request, scopes, ACCESS_TOKEN_TYP, &options)?;
+    check_token_cut_off(request, &did, payload.iat).await?;
     let ValidateAccessTokenOpts {
         check_takedown,
         check_deactivated,

@@ -25,10 +25,15 @@ const MIN_ACCESS_TOKEN_LIFETIME_SECS: u64 = 5 * 60;
 
 /// How long a password or app-password session's access token lives:
 /// `PDS_ACCESS_TOKEN_LIFETIME_SECS`, between five minutes and the reference PDS's two
-/// hours (the default). Access tokens are stateless, so this bounds how long one keeps
-/// working after its session is revoked (a password change, a takedown).
+/// hours (the default). A password change or takedown ends every token issued before it
+/// at once ([`cut_off_tokens`]); this bounds how long one keeps working after any other
+/// revocation of its session (deleting it, revoking one app password).
 static ACCESS_TOKEN_LIFETIME: LazyLock<u64> = LazyLock::new(|| {
-    access_token_lifetime(std::env::var("PDS_ACCESS_TOKEN_LIFETIME_SECS").ok().as_deref())
+    access_token_lifetime(
+        std::env::var("PDS_ACCESS_TOKEN_LIFETIME_SECS")
+            .ok()
+            .as_deref(),
+    )
 });
 
 fn access_token_lifetime(setting: Option<&str>) -> u64 {
@@ -591,6 +596,67 @@ pub async fn revoke_refresh_token(id: String, db: &Db) -> Result<bool> {
     .await
 }
 
+/// The rsky-only table the token cut-off lives in. It is not a migration: it is created
+/// by the first cut-off (a write that changes the database anyway), so a reference-PDS
+/// `account.sqlite` that is only read keeps its schema exactly, and the reference PDS
+/// ignores the extra table. A database without it has no cut-offs.
+const CREATE_TOKEN_CUTOFF: &str = "CREATE TABLE IF NOT EXISTS token_cutoff (\
+    did varchar PRIMARY KEY, \
+    \"validAfter\" integer NOT NULL\
+);";
+
+/// Cuts off every session token `did` holds: any access or refresh JWT issued at or
+/// before now (in whole seconds, the JWT `iat` resolution) is refused from here on,
+/// stateless or not. Set when the password changes and on takedown. The cut-off only
+/// moves forward. Returns it.
+pub async fn cut_off_tokens(did: &str, db: &Db) -> Result<u64> {
+    let did = did.to_owned();
+    let at = now_secs();
+    db.run(move |conn| {
+        conn.execute_batch(CREATE_TOKEN_CUTOFF)?;
+        conn.execute(
+            "INSERT INTO token_cutoff (did, \"validAfter\") VALUES (?1, ?2) \
+             ON CONFLICT (did) DO UPDATE \
+             SET \"validAfter\" = max(\"validAfter\", excluded.\"validAfter\")",
+            params![did, at as i64],
+        )?;
+        Ok(at)
+    })
+    .await
+}
+
+/// The cut-off [`cut_off_tokens`] last set for `did`, if any. Reads only: without the
+/// table (no cut-off ever), nothing is created.
+pub async fn tokens_cut_off_at(did: &str, db: &Db) -> Result<Option<u64>> {
+    let did = did.to_owned();
+    db.run(move |conn| {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+             WHERE type = 'table' AND name = 'token_cutoff')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let at: Option<i64> = conn
+            .query_row(
+                "SELECT \"validAfter\" FROM token_cutoff WHERE did = ?1",
+                params![did],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(at.map(|at| at.max(0) as u64))
+    })
+    .await
+}
+
+/// Whether a token issued at `iat` falls at or before `cut_off` (and is refused). A
+/// token without `iat` counts as issued at the epoch.
+pub fn cut_off(iat: Option<u64>, cut_off: Option<u64>) -> bool {
+    cut_off.is_some_and(|at| iat.unwrap_or(0) <= at)
+}
+
 pub async fn revoke_refresh_tokens_by_did(did: &str, db: &Db) -> Result<bool> {
     let did = did.to_owned();
     db.run(move |conn| {
@@ -727,6 +793,15 @@ mod tests {
         assert_eq!(access_token_lifetime(Some("10")), 5 * 60);
         assert_eq!(access_token_lifetime(Some("999999")), 2 * 60 * 60);
         assert_eq!(access_token_lifetime(Some("soon")), 2 * 60 * 60);
+    }
+
+    #[test]
+    fn tokens_at_or_before_the_cut_off_are_refused() {
+        assert!(!cut_off(Some(100), None), "no cut-off: nothing refused");
+        assert!(cut_off(Some(99), Some(100)));
+        assert!(cut_off(Some(100), Some(100)), "the same second is refused");
+        assert!(!cut_off(Some(101), Some(100)));
+        assert!(cut_off(None, Some(100)), "no iat counts as the epoch");
     }
 
     use super::*;

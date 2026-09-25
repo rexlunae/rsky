@@ -1104,7 +1104,11 @@ async fn a_password_change_revokes_every_session_and_app_password() {
     .unwrap();
 
     assert_eq!(oauth_token_count(&am, "did:plc:fred").await, 0);
-    assert!(am.list_app_passwords("did:plc:fred").await.unwrap().is_empty());
+    assert!(am
+        .list_app_passwords("did:plc:fred")
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         am.verify_app_password("did:plc:fred", &app.password)
             .await
@@ -1256,4 +1260,30 @@ async fn account_mutations_follow_the_allowlist() {
             .downcast_ref::<crate::admission::NotAdmitted>()
             .is_none());
     }
+}
+
+/// The token cut-off's table is created by the first cut-off, never by a read, so a
+/// reference-PDS `account.sqlite` that is only read keeps its schema.
+#[tokio::test]
+async fn the_token_cut_off_table_appears_only_on_a_cut_off() {
+    let (_dir, am) = test_manager().await;
+    let has_table = || {
+        am.db.run(|conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'token_cutoff')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+    };
+    assert_eq!(am.tokens_cut_off_at("did:plc:grace").await.unwrap(), None);
+    assert!(!has_table().await.unwrap(), "a read created the table");
+    let at = auth::cut_off_tokens("did:plc:grace", &am.db).await.unwrap();
+    assert!(has_table().await.unwrap());
+    assert_eq!(
+        am.tokens_cut_off_at("did:plc:grace").await.unwrap(),
+        Some(at)
+    );
+    assert_eq!(am.tokens_cut_off_at("did:plc:other").await.unwrap(), None);
 }
