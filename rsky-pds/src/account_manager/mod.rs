@@ -478,6 +478,12 @@ impl AccountManager {
         .await
     }
 
+    /// Changes the password and closes every way in that the old one could have opened:
+    /// refresh tokens (password and app-password sessions), OAuth sessions (their access
+    /// tokens are checked against the session row, so they stop at once), and every app
+    /// password, since a full session can mint one that would otherwise outlive the
+    /// change. Access JWTs of password and app-password sessions are stateless and live
+    /// out their lifetime (`PDS_ACCESS_TOKEN_LIFETIME_SECS`).
     pub async fn update_account_password(&self, opts: UpdateAccountPasswordOpts) -> Result<()> {
         self.admit(&opts.did)?;
         let UpdateAccountPasswordOpts { did, .. } = opts;
@@ -491,7 +497,9 @@ impl AccountManager {
                 &self.db
             ),
             email_token::delete_email_token(&did, EmailTokenPurpose::ResetPassword, &self.db),
-            auth::revoke_refresh_tokens_by_did(&did, &self.db)
+            auth::revoke_refresh_tokens_by_did(&did, &self.db),
+            auth::revoke_oauth_tokens_by_did(&did, &self.db),
+            password::delete_all_app_passwords(&did, &self.db)
         )?;
         Ok(())
     }

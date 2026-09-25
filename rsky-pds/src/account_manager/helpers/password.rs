@@ -240,6 +240,17 @@ pub async fn update_user_password(opts: UpdateUserPasswordOpts, db: &Db) -> Resu
     .await
 }
 
+/// Deletes every app password of `did` (their refresh tokens are revoked apart, with
+/// all of the account's refresh tokens).
+pub async fn delete_all_app_passwords(did: &str, db: &Db) -> Result<()> {
+    let did = did.to_owned();
+    db.run(move |conn| {
+        conn.execute("DELETE FROM app_password WHERE did = ?1", params![did])?;
+        Ok(())
+    })
+    .await
+}
+
 pub async fn delete_app_password(did: &str, name: &str, db: &Db) -> Result<()> {
     let did = did.to_owned();
     let name = name.to_owned();

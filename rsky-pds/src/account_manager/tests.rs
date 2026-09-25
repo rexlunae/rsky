@@ -1067,6 +1067,77 @@ async fn takedown_revokes_oauth_sessions() {
 }
 
 #[tokio::test]
+async fn a_password_change_revokes_every_session_and_app_password() {
+    let (_dir, am) = test_manager().await;
+    create_test_account(&am, "did:plc:fred", "fred.test").await;
+    let app = am
+        .create_app_password("did:plc:fred".to_owned(), "Other App".to_owned())
+        .await
+        .unwrap();
+    am.create_session(
+        "did:plc:fred".to_owned(),
+        Some(AppPassDescript {
+            name: "Other App".to_owned(),
+            privileged: false,
+        }),
+        false,
+    )
+    .await
+    .unwrap();
+    am.create_session("did:plc:fred".to_owned(), None, false)
+        .await
+        .unwrap();
+    seed_oauth_token(&am, "did:plc:fred", "token-1").await;
+    // Another account's sessions are untouched.
+    create_test_account(&am, "did:plc:gina", "gina.test").await;
+    seed_oauth_token(&am, "did:plc:gina", "token-2").await;
+    let other_app = am
+        .create_app_password("did:plc:gina".to_owned(), "Kept".to_owned())
+        .await
+        .unwrap();
+
+    am.update_account_password(UpdateAccountPasswordOpts {
+        did: "did:plc:fred".to_owned(),
+        password: "a-new-password-0123".to_owned(),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(oauth_token_count(&am, "did:plc:fred").await, 0);
+    assert!(am.list_app_passwords("did:plc:fred").await.unwrap().is_empty());
+    assert_eq!(
+        am.verify_app_password("did:plc:fred", &app.password)
+            .await
+            .unwrap(),
+        None
+    );
+    let fred_refresh: i64 = am
+        .db
+        .run(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM refresh_token WHERE did = 'did:plc:fred'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+        .unwrap();
+    assert_eq!(fred_refresh, 0);
+    assert!(am
+        .verify_account_password("did:plc:fred", &"a-new-password-0123".to_owned())
+        .await
+        .unwrap());
+
+    assert_eq!(oauth_token_count(&am, "did:plc:gina").await, 1);
+    assert!(am
+        .verify_app_password("did:plc:gina", &other_app.password)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
 async fn delete_account_revokes_oauth_sessions() {
     let (_dir, am) = test_manager().await;
     create_test_account(&am, "did:plc:erin", "erin.test").await;
