@@ -400,15 +400,11 @@ async fn format_did_and_plc_op(
     input: CreateAccountInput,
     signing_key: &Keypair,
 ) -> Result<(String, Operation), ApiError> {
-    let mut rotation_keys: Vec<String> = Vec::new();
-
-    //Add user provided rotation key
-    if let Some(recovery_key) = &input.recovery_key {
-        rotation_keys.push(recovery_key.clone());
-    }
-
-    //Add PDS rotation key
-    rotation_keys.push(encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key()));
+    let rotation_keys = plc_rotation_keys(
+        input.recovery_key.as_deref(),
+        env_str("PDS_RECOVERY_DID_KEY").as_deref(),
+        encode_did_key(&PDS_PLC_ROTATION_KEYPAIR.public_key()),
+    );
 
     //Build PLC Create Operation
 
@@ -443,9 +439,54 @@ fn resolve_invite_code(required: bool, provided: Option<&str>) -> Result<Option<
     }
 }
 
+/// The rotation keys of a new account's PLC document, highest priority first, as the
+/// reference PDS orders them: the key the caller supplied (`recoveryKey`), then the
+/// operator's recovery key (`PDS_RECOVERY_DID_KEY`), then this PDS's own rotation key.
+fn plc_rotation_keys(
+    user_key: Option<&str>,
+    operator_recovery_key: Option<&str>,
+    pds_key: String,
+) -> Vec<String> {
+    [user_key, operator_recovery_key]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .chain(std::iter::once(pds_key))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_invite_code;
+    use super::{plc_rotation_keys, resolve_invite_code};
+
+    #[test]
+    fn rotation_keys_put_the_user_then_the_operator_then_the_pds() {
+        let pds = "did:key:zPds".to_string();
+        assert_eq!(
+            plc_rotation_keys(
+                Some("did:key:zUser"),
+                Some("did:key:zOperator"),
+                pds.clone()
+            ),
+            ["did:key:zUser", "did:key:zOperator", "did:key:zPds"]
+        );
+        assert_eq!(
+            plc_rotation_keys(None, Some("did:key:zOperator"), pds.clone()),
+            ["did:key:zOperator", "did:key:zPds"]
+        );
+        assert_eq!(
+            plc_rotation_keys(Some("did:key:zUser"), None, pds.clone()),
+            ["did:key:zUser", "did:key:zPds"]
+        );
+        assert_eq!(plc_rotation_keys(None, None, pds.clone()), ["did:key:zPds"]);
+        // An empty or blank setting is no key at all.
+        assert_eq!(
+            plc_rotation_keys(Some(""), Some("  "), pds),
+            ["did:key:zPds"]
+        );
+    }
     use crate::apis::ApiError;
 
     #[test]
